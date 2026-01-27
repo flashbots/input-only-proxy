@@ -12,13 +12,47 @@ This proxy allows authenticated clients to stream data into a container through 
 - **Timing attack prevention** via unbounded buffering
 - **Simple protocol**: authenticate once, then stream unlimited data
 
-## Protocol
+## Protocol Flow
 
-1. Client connects to TCP port (default: 27017)
-2. Server sends 32-byte random challenge
-3. Client signs challenge with Ed25519 private key
-4. Server verifies signature against public key
-5. If authenticated, client can stream data until connection closes
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant P as Proxy
+    participant U as Unix Socket
+    participant Co as Container
+    
+    Note over C,Co: Authentication Phase
+    C->>P: TCP Connect (port 27017)
+    P->>C: Send 32-byte random challenge
+    C->>C: Sign challenge with private key
+    C->>P: Send Ed25519 signature
+    P->>P: Verify signature with public key
+    alt Signature Valid
+        P->>C: Send AUTH_SUCCESS (0x01)
+    else Signature Invalid
+        P->>C: Send AUTH_FAILURE (0x00)
+        P--xC: Close connection
+    end
+    
+    Note over C,Co: Data Forwarding Phase (Timing Isolated)
+    Note over C,P: ⚠️ Data is NOT encrypted by proxy<br/>User should encrypt sensitive data<br/>before transmission if needed
+    C->>P: Stream data (any size)
+    P->>P: Buffer in unbounded channel
+    Note right of P: TCP reader never blocks<br/>regardless of container speed
+    P->>U: Forward from channel
+    U->>Co: Deliver to container
+    Note right of Co: Container can consume<br/>at any speed without<br/>affecting TCP timing
+    
+    C--xP: Close connection
+    Note over P,Co: Channel drains remaining data
+```
+
+### Key Security Properties
+
+1. **Authentication**: Only clients with the private key can connect
+2. **Timing Isolation**: The unbounded channel between TCP reader and Unix writer prevents the container's consumption speed from affecting TCP timing, preventing timing side-channel attacks
+3. **Unidirectional**: Data flows only from client to container, no backchannel
+4. **No Built-in Encryption**: The proxy forwards data as-is after authentication. Users should implement their own encryption for sensitive data
 
 ## Building
 
@@ -85,7 +119,7 @@ cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
 - **Unidirectional flow**: Data flows only from client to container (no backchannel)
 - **Timing isolation**: Unbounded buffering prevents timing side-channel attacks
 - **SSH key compatible**: Works with existing SSH Ed25519 keys
-- **No encryption**: Data is forwarded as-is (searchers should encrypt sensitive data if needed)
+- **No encryption**: Data is forwarded as-is (users should encrypt sensitive data if needed)
 
 ## License
 
