@@ -18,4 +18,3 @@ anyhow = "1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 clap = { version = "4.5.54", features = ["derive", "env"] }
-

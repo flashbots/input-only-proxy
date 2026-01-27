@@ -9,6 +9,7 @@ This proxy allows authenticated clients to stream data into a container through 
 - **Ed25519 challenge-response authentication** using SSH public keys
 - **Unidirectional data flow** (TCP client → Unix socket only)
 - **Support for large data transfers** (multi-GB streaming)
+- **Timing attack prevention** via unbounded buffering
 - **Simple protocol**: authenticate once, then stream unlimited data
 
 ## Protocol
@@ -30,10 +31,10 @@ cargo build --release
 ### Server (Proxy)
 
 ```bash
-# Basic usage with defaults (uses public key)
+# Basic usage with defaults
 ./target/release/secure-input-proxy
 
-# Custom configuration with public key
+# Custom configuration
 ./target/release/secure-input-proxy \
     --listen 0.0.0.0:27017 \
     --unix-socket /persistent/input/input.sock \
@@ -80,10 +81,11 @@ cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
 
 ## Security Features
 
-- Only holders of the private key can authenticate
-- Data flows unidirectionally (no backchannel)
-- Each connection requires authentication
-- Compatible with existing SSH Ed25519 keys
+- **Authentication**: Only holders of the private key can authenticate
+- **Unidirectional flow**: Data flows only from client to container (no backchannel)
+- **Timing isolation**: Unbounded buffering prevents timing side-channel attacks
+- **SSH key compatible**: Works with existing SSH Ed25519 keys
+- **No encryption**: Data is forwarded as-is (searchers should encrypt sensitive data if needed)
 
 ## License
 
