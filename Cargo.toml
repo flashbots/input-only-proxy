@@ -1,12 +1,12 @@
 [package]
-name = "secure-input-proxy"
+name = "input-only-proxy"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
-description = "Secure unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments"
-homepage = "https://github.com/flashbots/secure-input-proxy"
-repository = "https://github.com/flashbots/secure-input-proxy"
+description = "Unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments"
+homepage = "https://github.com/flashbots/input-only-proxy"
+repository = "https://github.com/flashbots/input-only-proxy"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"] }

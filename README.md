@@ -1,6 +1,6 @@
-# Secure Input Proxy
+# Input Only Proxy
 
-A secure, unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments.
+A unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments.
 
 ## Overview
 
@@ -66,10 +66,10 @@ cargo build --release
 
 ```bash
 # Basic usage with defaults
-./target/release/secure-input-proxy
+./target/release/input-only-proxy
 
 # Custom configuration
-./target/release/secure-input-proxy \
+./target/release/input-only-proxy \
     --listen 0.0.0.0:27017 \
     --unix-socket /persistent/input/input.sock \
     --pubkey-file /etc/searcher_key  # SSH public key (e.g., id_ed25519.pub)

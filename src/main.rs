@@ -1,5 +1,5 @@
 /*
- * Timing-Isolated Secure Input Proxy
+ * Timing-Isolated Input Only Proxy
  * 
  * PURPOSE: Prevent timing side-channel attacks where data consumption patterns
  * could leak information about sensitive orderflow data.
@@ -240,7 +240,7 @@ async fn main() -> Result<()> {
         .with_env_filter(&config.log_level)
         .init();
 
-    info!("Secure Input Proxy v{} - Timing Isolation Enabled", env!("CARGO_PKG_VERSION"));
+    info!("Input Only Proxy v{} - Timing Isolation Enabled", env!("CARGO_PKG_VERSION"));
     info!("Purpose: Prevent timing-based attacks");
     info!("Listening: {}", config.listen);
     info!("Container socket: {}", config.unix_socket.display());

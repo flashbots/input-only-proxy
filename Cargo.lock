@@ -414,6 +414,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "input-only-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.9.2",
+ "ssh-key",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -829,21 +844,6 @@ dependencies = [
  "pkcs8",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "secure-input-proxy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ed25519-dalek",
- "hex",
- "rand 0.9.2",
- "ssh-key",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
