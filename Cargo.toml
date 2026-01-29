@@ -1,8 +1,8 @@
 [package]
 name = "input-only-proxy"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.90"
+edition = "2021"
+rust-version = "1.85"
 license = "MIT"
 description = "Unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments"
 homepage = "https://github.com/flashbots/input-only-proxy"
