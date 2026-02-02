@@ -6,13 +6,15 @@ A unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX en
 
 This proxy allows authenticated clients to stream data into a container through a Unix socket. It provides:
 
-- **Ed25519 challenge-response authentication** using SSH public keys
+- **Ed25519 authentication** using SSH public keys (both challenge-response and TLS modes)
 - **Unidirectional data flow** (TCP client → Unix socket only)
 - **Support for large data transfers** (multi-GB streaming)
 - **Timing attack prevention** via unbounded buffering
-- **Simple protocol**: authenticate once, then stream unlimited data
+- **Two modes**: Plain TCP with challenge-response or TLS with mutual authentication
 
-## Protocol Flow
+## Protocol Options
+
+### Option 1: Plain TCP with Challenge-Response
 
 ```mermaid
 sequenceDiagram
@@ -35,7 +37,7 @@ sequenceDiagram
     end
     
     Note over C,Co: Data Forwarding Phase (Timing Isolated)
-    Note over C,P: ⚠️ Data is NOT encrypted by proxy<br/>User should encrypt sensitive data<br/>before transmission if needed
+    Note over C,P: ⚠️ Data is NOT encrypted<br/>User should encrypt sensitive data
     C->>P: Stream data (any size)
     P->>P: Buffer in unbounded channel
     Note right of P: TCP reader never blocks<br/>regardless of container speed
@@ -47,12 +49,46 @@ sequenceDiagram
     Note over P,Co: Channel drains remaining data
 ```
 
+### Option 2: TLS with Mutual Authentication (Recommended)
+
+```mermaid
+sequenceDiagram
+    participant C as TLS Client
+    participant P as TLS Proxy
+    participant U as Unix Socket
+    participant Co as Container
+    
+    Note over C,Co: TLS Handshake with mTLS
+    C->>P: TLS Connect (port 27018)
+    P->>C: Server Certificate (self-signed)
+    C->>P: Client Certificate (from SSH key)
+    P->>P: Extract Ed25519 pubkey from cert
+    P->>P: Compare with /etc/searcher_key
+    alt Public Key Matches
+        P->>C: TLS Handshake Complete
+    else Public Key Mismatch
+        P->>C: TLS Alert: AccessDenied
+        P--xC: Close connection
+    end
+    
+    Note over C,Co: Encrypted Data Transfer (Timing Isolated)
+    Note over C,P: ✅ Data is TLS encrypted
+    C->>P: Stream encrypted data
+    P->>P: Decrypt & buffer in channel
+    P->>U: Forward plaintext
+    U->>Co: Deliver to container
+    
+    C--xP: TLS close
+```
+
 ### Key Security Properties
 
 1. **Authentication**: Only clients with the private key can connect
 2. **Timing Isolation**: The unbounded channel between TCP reader and Unix writer prevents the container's consumption speed from affecting TCP timing, preventing timing side-channel attacks
 3. **Unidirectional**: Data flows only from client to container, no backchannel
-4. **No Built-in Encryption**: The proxy forwards data as-is after authentication. Users should implement their own encryption for sensitive data
+4. **Encryption**: 
+   - Plain TCP mode: No encryption, users should encrypt sensitive data
+   - TLS mode: Full TLS 1.3 encryption with Ed25519 certificates
 
 ## Building
 
@@ -62,8 +98,9 @@ cargo build --release
 
 ## Usage
 
-### Server (Proxy)
+### Plain TCP Mode
 
+#### Server
 ```bash
 # Basic usage with defaults
 ./target/release/input-only-proxy
@@ -75,8 +112,7 @@ cargo build --release
     --pubkey-file /etc/searcher_key  # SSH public key (e.g., id_ed25519.pub)
 ```
 
-### Client Example
-
+#### Client
 ```bash
 # Using SSH private key (note: private, not .pub)
 cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
@@ -86,8 +122,29 @@ echo "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" > test.k
 cargo run --example client -- 127.0.0.1:27017 test.key
 ```
 
+### TLS Mode (Recommended)
+
+#### Server
+```bash
+# Run TLS-enabled proxy
+cargo run --bin input-proxy-tls -- \
+    --listen 0.0.0.0:27018 \
+    --unix-socket /persistent/input/input.sock \
+    --pubkey-file /etc/searcher_key  # SSH public key
+```
+
+#### Client
+```bash
+# Step 1: Convert SSH key to TLS certificate (one time)
+./ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
+
+# Step 2: Connect with TLS client
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
+```
+
 ### Testing Locally
 
+#### Plain TCP Mode
 1. Start the Unix socket listener (simulates container):
 ```bash
 cargo run --example unix_listener
@@ -101,6 +158,28 @@ cargo run -- --unix-socket /tmp/test_input.sock --pubkey-file ~/.ssh/id_ed25519.
 3. Run the client with your SSH **private** key (in third terminal):
 ```bash
 cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
+```
+
+#### TLS Mode
+1. Start the Unix socket listener (simulates container):
+```bash
+cargo run --example unix_listener
+```
+
+2. Start the TLS proxy with your SSH **public** key:
+```bash
+cargo run --bin input-proxy-tls -- \
+    --unix-socket /tmp/test_input.sock \
+    --pubkey-file ~/.ssh/id_ed25519.pub
+```
+
+3. Generate client certificate and connect:
+```bash
+# Generate certificate (one time)
+./ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
+
+# Connect
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
 ```
 
 ## Configuration
@@ -119,7 +198,9 @@ cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
 - **Unidirectional flow**: Data flows only from client to container (no backchannel)
 - **Timing isolation**: Unbounded buffering prevents timing side-channel attacks
 - **SSH key compatible**: Works with existing SSH Ed25519 keys
-- **No encryption**: Data is forwarded as-is (users should encrypt sensitive data if needed)
+- **Encryption options**: 
+  - Plain TCP: No encryption (users should encrypt sensitive data)
+  - TLS mode: Full TLS 1.3 encryption with mutual authentication
 
 ## License
 
