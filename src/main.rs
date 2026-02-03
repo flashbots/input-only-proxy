@@ -33,12 +33,15 @@ const READ_BUFFER_SIZE: usize = 64 * 1024; // 64KB chunks
 #[derive(Parser)]
 #[clap(about = "TLS-enabled timing-isolated proxy with ed25519 authentication")]
 struct Config {
+    /// Address and port to listen on for TLS connections
     #[clap(long, default_value = "0.0.0.0:27018")]
     listen: SocketAddr,
 
+    /// Path to Unix socket to connect to container
     #[clap(long, default_value = "/persistent/input/input.sock")]
     unix_socket: PathBuf,
 
+    /// Path to Ed25519 public key in SSH format for client cert verification
     #[clap(long, default_value = "/etc/searcher_key")]
     pubkey_file: PathBuf,
 
