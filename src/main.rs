@@ -71,13 +71,14 @@ async fn load_ed25519_pubkey(path: &Path) -> Result<VerifyingKey> {
         .context("Invalid Ed25519 key bytes")
 }
 
-/// Security check: ensure path is actually a Unix socket
+/// Security check: ensure path is actually a Unix socket (not a symlink)
 async fn verify_unix_socket(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(()); // Will be created by container
     }
 
-    let metadata = tokio::fs::metadata(path).await?;
+    // Use symlink_metadata to check the path itself, not following symlinks
+    let metadata = tokio::fs::symlink_metadata(path).await?;
 
     #[cfg(unix)]
     {
