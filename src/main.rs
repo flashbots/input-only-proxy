@@ -16,6 +16,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DistinguishedName, SignatureScheme};
 use ssh_key::PublicKey;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,6 +44,14 @@ struct Config {
 
     #[clap(long, env = "RUST_LOG", default_value = "info")]
     log_level: String,
+
+    /// Path to store/load server certificate
+    #[clap(long, default_value = "/persistent/server.crt")]
+    server_cert_path: PathBuf,
+
+    /// Path to store/load server private key
+    #[clap(long, default_value = "/persistent/server.key")]
+    server_key_path: PathBuf,
 }
 
 /// Load Ed25519 public key from SSH format (handles both full and base64-only formats)
@@ -213,26 +223,81 @@ impl ClientCertVerifier for Ed25519CertVerifier {
     }
 }
 
-/// Generate a self-signed certificate for the server
-/// Note: This is just for TLS transport. The client ignores this cert,
-/// real authentication happens via client certificate validation
-fn generate_server_cert() -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+/// Generate and save a self-signed certificate for the server
+fn generate_and_store_cert(cert_path: &Path, key_path: &Path) -> Result<()> {
     use rcgen::CertificateParams;
 
-    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
+    let mut params = CertificateParams::new(vec!["localhost".into()])?;
     params.subject_alt_names = vec![
         rcgen::SanType::DnsName("localhost".try_into().unwrap()),
         rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
     ];
 
-    let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+    let keypair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+    let cert = params.self_signed(&keypair)?;
 
-    let cert = params.self_signed(&key_pair)?;
-    let cert_der = CertificateDer::from(cert.der().to_vec());
-    let key_der = PrivateKeyDer::try_from(key_pair.serialized_der().to_vec())
-        .map_err(|e| anyhow::anyhow!("Failed to convert key: {}", e))?;
+    // Save certificate and key to separate files
+    std::fs::write(cert_path, cert.pem())?;
+    std::fs::write(key_path, keypair.serialize_pem())?;
 
-    Ok((vec![cert_der], key_der))
+    info!("Generated new server certificate: {:?}", cert_path);
+    info!("Generated new server key: {:?}", key_path);
+
+    Ok(())
+}
+
+/// Load certificate and key from separate PEM files
+fn load_cert_and_key(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    use rustls_pemfile::{certs, private_key};
+
+    // Load certificate
+    let mut cert_reader = BufReader::new(File::open(cert_path)
+        .with_context(|| format!("Failed to open certificate file: {:?}", cert_path))?);
+    let certs = certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse certificates")?;
+
+    if certs.is_empty() {
+        bail!("No certificates found in file: {:?}", cert_path);
+    }
+
+    // Load private key
+    let mut key_reader = BufReader::new(File::open(key_path)
+        .with_context(|| format!("Failed to open key file: {:?}", key_path))?);
+    let key = private_key(&mut key_reader)?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in file: {:?}", key_path))?;
+
+    info!("Loaded server certificate from: {:?}", cert_path);
+    info!("Loaded server key from: {:?}", key_path);
+
+    Ok((certs, key))
+}
+
+
+/// Load existing certificate or generate new one
+async fn load_or_generate_server_cert(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    if cert_path.exists() && key_path.exists() {
+        // Load existing certificate and key
+        load_cert_and_key(cert_path, key_path)
+    } else {
+        // Create parent directory if needed
+        if let Some(dir) = cert_path.parent() {
+            tokio::fs::create_dir_all(dir).await
+                .with_context(|| format!("Failed to create directory: {:?}", dir))?;
+        }
+
+        // Generate and store new certificate
+        generate_and_store_cert(cert_path, key_path)?;
+        
+        // Load the newly generated files
+        load_cert_and_key(cert_path, key_path)
+    }
 }
 
 /// Fast TLS reader - never blocks regardless of consumption speed
@@ -375,9 +440,11 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to create directory: {:?}", parent))?;
     }
 
-    // Generate server certificate (self-signed, client ignores this)
-    let (cert_chain, key_der) = generate_server_cert()?;
-    info!("Generated server certificate (for TLS transport only)");
+    // Load or generate server certificate
+    let (cert_chain, key_der) = load_or_generate_server_cert(
+        &config.server_cert_path,
+        &config.server_key_path
+    ).await?;
 
     // Configure TLS with custom client cert verifier
     let verifier = Ed25519CertVerifier::new(pubkey);
