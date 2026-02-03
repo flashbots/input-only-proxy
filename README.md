@@ -1,58 +1,55 @@
 # Input Only Proxy
 
-A unidirectional TCP to Unix socket proxy with Ed25519 authentication for TDX environments.
+A unidirectional TCP to Unix socket proxy with TLS encryption and Ed25519 authentication for TDX environments.
 
 ## Overview
 
 This proxy allows authenticated clients to stream data into a container through a Unix socket. It provides:
 
-- **Ed25519 challenge-response authentication** using SSH public keys
+- **TLS 1.3 encryption** with mutual authentication
+- **Ed25519 authentication** using existing SSH public keys
 - **Unidirectional data flow** (TCP client → Unix socket only)
 - **Support for large data transfers** (multi-GB streaming)
 - **Timing attack prevention** via unbounded buffering
-- **Simple protocol**: authenticate once, then stream unlimited data
 
-## Protocol Flow
+## Protocol
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant P as Proxy
+    participant C as TLS Client
+    participant P as TLS Proxy
     participant U as Unix Socket
     participant Co as Container
     
-    Note over C,Co: Authentication Phase
-    C->>P: TCP Connect (port 27017)
-    P->>C: Send 32-byte random challenge
-    C->>C: Sign challenge with private key
-    C->>P: Send Ed25519 signature
-    P->>P: Verify signature with public key
-    alt Signature Valid
-        P->>C: Send AUTH_SUCCESS (0x01)
-    else Signature Invalid
-        P->>C: Send AUTH_FAILURE (0x00)
+    Note over C,Co: TLS Handshake with mTLS
+    C->>P: TLS Connect (port 27018)
+    P->>C: Server Certificate (self-signed)
+    C->>P: Client Certificate (from SSH key)
+    P->>P: Extract Ed25519 pubkey from cert
+    P->>P: Compare with /etc/searcher_key
+    alt Public Key Matches
+        P->>C: TLS Handshake Complete
+    else Public Key Mismatch
+        P->>C: TLS Alert: AccessDenied
         P--xC: Close connection
     end
     
-    Note over C,Co: Data Forwarding Phase (Timing Isolated)
-    Note over C,P: ⚠️ Data is NOT encrypted by proxy<br/>User should encrypt sensitive data<br/>before transmission if needed
-    C->>P: Stream data (any size)
-    P->>P: Buffer in unbounded channel
-    Note right of P: TCP reader never blocks<br/>regardless of container speed
-    P->>U: Forward from channel
+    Note over C,Co: Encrypted Data Transfer (Timing Isolated)
+    Note over C,P: ✅ Data is TLS encrypted
+    C->>P: Stream encrypted data
+    P->>P: Decrypt & buffer in channel
+    P->>U: Forward plaintext
     U->>Co: Deliver to container
-    Note right of Co: Container can consume<br/>at any speed without<br/>affecting TCP timing
     
-    C--xP: Close connection
-    Note over P,Co: Channel drains remaining data
+    C--xP: TLS close
 ```
 
-### Key Security Properties
+## Key Security Properties
 
-1. **Authentication**: Only clients with the private key can connect
-2. **Timing Isolation**: The unbounded channel between TCP reader and Unix writer prevents the container's consumption speed from affecting TCP timing, preventing timing side-channel attacks
-3. **Unidirectional**: Data flows only from client to container, no backchannel
-4. **No Built-in Encryption**: The proxy forwards data as-is after authentication. Users should implement their own encryption for sensitive data
+1. **Encryption**: Full TLS 1.3 encryption for all data
+2. **Authentication**: Only clients with the private key can connect (Ed25519 mTLS)
+3. **Timing Isolation**: The unbounded channel between TLS reader and Unix writer prevents the container's consumption speed from affecting TCP timing, preventing timing side-channel attacks
+4. **Unidirectional**: Data flows only from client to container, no backchannel
 
 ## Building
 
@@ -62,28 +59,25 @@ cargo build --release
 
 ## Usage
 
-### Server (Proxy)
-
+### Server
 ```bash
 # Basic usage with defaults
 ./target/release/input-only-proxy
 
 # Custom configuration
 ./target/release/input-only-proxy \
-    --listen 0.0.0.0:27017 \
+    --listen 0.0.0.0:27018 \
     --unix-socket /persistent/input/input.sock \
     --pubkey-file /etc/searcher_key  # SSH public key (e.g., id_ed25519.pub)
 ```
 
-### Client Example
-
+### Client
 ```bash
-# Using SSH private key (note: private, not .pub)
-cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
+# Step 1: Convert SSH key to TLS certificate (one time)
+./scripts/ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
 
-# Using hex-encoded private key file
-echo "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" > test.key
-cargo run --example client -- 127.0.0.1:27017 test.key
+# Step 2: Connect with TLS client
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
 ```
 
 ### Testing Locally
@@ -98,16 +92,20 @@ cargo run --example unix_listener
 cargo run -- --unix-socket /tmp/test_input.sock --pubkey-file ~/.ssh/id_ed25519.pub
 ```
 
-3. Run the client with your SSH **private** key (in third terminal):
+3. Generate client certificate and connect (in third terminal):
 ```bash
-cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
+# Generate certificate (one time)
+./ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
+
+# Connect
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
 ```
 
 ## Configuration
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--listen` | `0.0.0.0:27017` | TCP address to listen on |
+| `--listen` | `0.0.0.0:27018` | TLS address to listen on |
 | `--unix-socket` | `/persistent/input/input.sock` | Unix socket path to forward to |
 | `--pubkey-file` | `/etc/searcher_key` | SSH Ed25519 public key file |
 | `--log-level` | `info` | Logging level (via `RUST_LOG` env var) |
@@ -115,11 +113,11 @@ cargo run --example client -- 127.0.0.1:27017 ~/.ssh/id_ed25519
 
 ## Security Features
 
-- **Authentication**: Only holders of the private key can authenticate
+- **TLS 1.3 Encryption**: All data is encrypted in transit
+- **Mutual Authentication**: Client certificates derived from SSH Ed25519 keys
 - **Unidirectional flow**: Data flows only from client to container (no backchannel)
 - **Timing isolation**: Unbounded buffering prevents timing side-channel attacks
 - **SSH key compatible**: Works with existing SSH Ed25519 keys
-- **No encryption**: Data is forwarded as-is (users should encrypt sensitive data if needed)
 
 ## License
 
