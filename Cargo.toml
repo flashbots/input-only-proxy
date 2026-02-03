@@ -8,10 +8,6 @@ description = "Unidirectional TCP to Unix socket proxy with Ed25519 authenticati
 homepage = "https://github.com/flashbots/input-only-proxy"
 repository = "https://github.com/flashbots/input-only-proxy"
 
-[[bin]]
-name = "input-proxy-tls"
-path = "src/main_tls.rs"
-
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"] }
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
