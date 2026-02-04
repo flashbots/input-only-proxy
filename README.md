@@ -68,7 +68,9 @@ cargo build --release
 ./target/release/input-only-proxy \
     --listen 0.0.0.0:27018 \
     --unix-socket /persistent/input/input.sock \
-    --pubkey-file /etc/searcher_key  # SSH public key (e.g., id_ed25519.pub)
+    --pubkey-file /etc/searcher_key \  # SSH public key (ed25519)
+    --server-cert-path /persistent/server.crt \
+    --server-key-path /persistent/server.key
 ```
 
 ### Client
@@ -76,8 +78,11 @@ cargo build --release
 # Step 1: Convert SSH key to TLS certificate (one time)
 ./scripts/ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
 
-# Step 2: Connect with TLS client
+# Step 2: Connect with TLS client (accepts any server certificate)
 cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
+
+# Alternative: Connect with server certificate verification
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem server.crt
 ```
 
 ### Testing Locally
@@ -89,7 +94,11 @@ cargo run --example unix_listener
 
 2. Start the proxy with your SSH **public** key (in another terminal):
 ```bash
-cargo run -- --unix-socket /tmp/test_input.sock --pubkey-file ~/.ssh/id_ed25519.pub
+cargo run -- \
+    --unix-socket /tmp/test_input.sock \
+    --pubkey-file ~/.ssh/id_ed25519.pub \
+    --server-cert-path /tmp/server.crt \
+    --server-key-path /tmp/server.key
 ```
 
 3. Generate client certificate and connect (in third terminal):
@@ -97,8 +106,11 @@ cargo run -- --unix-socket /tmp/test_input.sock --pubkey-file ~/.ssh/id_ed25519.
 # Generate certificate (one time)
 ./ssh_to_tls_cert.py ~/.ssh/id_ed25519 client-cert.pem
 
-# Connect
+# Connect (accepts any server certificate)
 cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
+
+# Alternative: Connect with server certificate verification
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem /tmp/server.crt
 ```
 
 ## Configuration
@@ -108,6 +120,8 @@ cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
 | `--listen` | `0.0.0.0:27018` | TLS address to listen on |
 | `--unix-socket` | `/persistent/input/input.sock` | Unix socket path to forward to |
 | `--pubkey-file` | `/etc/searcher_key` | SSH Ed25519 public key file |
+| `--server-cert-path` | `/persistent/server.crt` | Server TLS certificate file (auto-generated if missing) |
+| `--server-key-path` | `/persistent/server.key` | Server TLS private key file (auto-generated if missing) |
 | `--log-level` | `info` | Logging level (via `RUST_LOG` env var) |
 
 
