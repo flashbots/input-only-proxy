@@ -126,8 +126,12 @@ cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem /tmp/test-prox
 
 - **TLS 1.3 Encryption**: All data is encrypted in transit
 - **Mutual Authentication**: Client certificates derived from SSH Ed25519 keys
+- **Dual-layer Rate Limiting**: 
+  - IP-based rate limiting (pre-authentication) - prevents DoS attacks
+  - Public key-based rate limiting (post-authentication) - prevents covert channels via multiple IPs
 - **Unidirectional flow**: Data flows only from client to container (no backchannel)
 - **Timing isolation**: Unbounded buffering prevents timing side-channel attacks
+- **Covert Channel Prevention**: Rate limiting blocks rapid reconnection timing attacks
 - **SSH key compatible**: Works with existing SSH Ed25519 keys
 
 ## License
