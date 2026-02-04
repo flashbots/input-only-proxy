@@ -12,13 +12,18 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
+use governor::state::keyed::DashMapStateStore;
+use governor::{Quota, RateLimiter};
+use rcgen::CertificateParams;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DistinguishedName, SignatureScheme};
+use rustls_pemfile::{certs, private_key};
 use ssh_key::PublicKey;
 use std::fs::File;
 use std::io::BufReader;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,6 +32,9 @@ use tokio::sync::mpsc;
 use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 use x509_parser::prelude::*;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 
 const READ_BUFFER_SIZE: usize = 64 * 1024; // 64KB chunks
 
@@ -56,7 +64,7 @@ struct Config {
 /// Load Ed25519 public key from SSH format (handles both full and base64-only formats)
 async fn load_ed25519_pubkey(path: &Path) -> Result<VerifyingKey> {
     let contents = tokio::fs::read_to_string(path).await
-        .with_context(|| format!("Failed to read public key: {:?}", path))?;
+        .with_context(|| format!("Failed to read public key: {}", path.display()))?;
 
     let contents = contents.trim();
 
@@ -65,7 +73,7 @@ async fn load_ed25519_pubkey(path: &Path) -> Result<VerifyingKey> {
     // 2. Base64 only: "AAAAC3Nza..."
     let ssh_key_str = if !contents.starts_with("ssh-ed25519 ") && !contents.is_empty() {
         info!("Key file contains base64 only, adding ssh-ed25519 prefix");
-        format!("ssh-ed25519 {}", contents)
+        format!("ssh-ed25519 {contents}")
     } else {
         contents.to_string()
     };
@@ -91,7 +99,6 @@ async fn verify_unix_socket(path: &Path) -> Result<()> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::FileTypeExt;
         if !metadata.file_type().is_socket() {
             bail!("Security violation: {} exists but is not a Unix socket", path.display());
         }
@@ -224,8 +231,6 @@ impl ClientCertVerifier for Ed25519CertVerifier {
 
 /// Generate and save a self-signed certificate for the server
 fn generate_and_store_cert(cert_path: &Path, key_path: &Path) -> Result<()> {
-    use rcgen::CertificateParams;
-
     let mut params = CertificateParams::new(vec!["localhost".into()])?;
     params.subject_alt_names = vec![
         rcgen::SanType::DnsName("localhost".try_into().unwrap()),
@@ -250,27 +255,25 @@ fn load_cert_and_key(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
-    use rustls_pemfile::{certs, private_key};
-
     // Load certificate
     let mut cert_reader = BufReader::new(File::open(cert_path)
-        .with_context(|| format!("Failed to open certificate file: {:?}", cert_path))?);
+        .with_context(|| format!("Failed to open certificate file: {}", cert_path.display()))?);
     let certs = certs(&mut cert_reader)
         .collect::<Result<Vec<_>, _>>()
         .context("Failed to parse certificates")?;
 
     if certs.is_empty() {
-        bail!("No certificates found in file: {:?}", cert_path);
+        bail!("No certificates found in file: {}", cert_path.display());
     }
 
     // Load private key
     let mut key_reader = BufReader::new(File::open(key_path)
-        .with_context(|| format!("Failed to open key file: {:?}", key_path))?);
+        .with_context(|| format!("Failed to open key file: {}", key_path.display()))?);
     let key = private_key(&mut key_reader)?
-        .ok_or_else(|| anyhow::anyhow!("No private key found in file: {:?}", key_path))?;
+        .ok_or_else(|| anyhow::anyhow!("No private key found in file: {}", key_path.display()))?;
 
-    info!("Loaded server certificate from: {:?}", cert_path);
-    info!("Loaded server key from: {:?}", key_path);
+    info!("Loaded server certificate from: {}", cert_path.display());
+    info!("Loaded server key from: {}", key_path.display());
 
     Ok((certs, key))
 }
@@ -291,7 +294,7 @@ async fn load_or_generate_server_cert(
         // Create parent directory if needed
         if let Some(dir) = cert_path.parent() {
             tokio::fs::create_dir_all(dir).await
-                .with_context(|| format!("Failed to create directory: {:?}", dir))?;
+                .with_context(|| format!("Failed to create directory: {}", dir.display()))?;
         }
 
         // Generate and store new certificate
@@ -407,7 +410,7 @@ async fn handle_client(
 
     // Forward data with timing isolation
     forward_with_timing_isolation(stream, &unix_path).await
-        .with_context(|| format!("Data forwarding failed for {}", client_addr))?;
+        .with_context(|| format!("Data forwarding failed for {client_addr}"))?;
 
     info!("Client disconnected: {}", client_addr);
     Ok(())
@@ -439,7 +442,7 @@ async fn main() -> Result<()> {
     // Create socket directory if needed
     if let Some(parent) = config.unix_socket.parent() {
         tokio::fs::create_dir_all(parent).await
-            .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
     // Load or generate server certificate
@@ -459,30 +462,73 @@ async fn main() -> Result<()> {
     // Start TCP listener
     let listener = TcpListener::bind(config.listen).await?;
     info!("TLS proxy ready - timing attacks prevented by unbounded buffering");
+    
+    // Initialize dual rate limiters for defense in depth
+    // 1. IP-based rate limiter (pre-authentication)
+    let ip_rate_limiter = Arc::new(
+        RateLimiter::<IpAddr, DashMapStateStore<IpAddr>, governor::clock::DefaultClock>::keyed(
+            Quota::per_minute(NonZeroU32::new(2).unwrap()) // Allow max 2 connections per minute per IP
+        )
+    );
+    
+    // 2. Public key-based rate limiter (post-authentication)
+    let pubkey_rate_limiter = Arc::new(
+        RateLimiter::<VerifyingKey, DashMapStateStore<VerifyingKey>, governor::clock::DefaultClock>::keyed(
+            Quota::per_minute(NonZeroU32::new(2).unwrap()) // Allow max 2 connections per minute per pubkey
+        )
+    );
+    
+    info!("Dual rate limiting enabled: max 2 connections per minute per IP and per public key");
 
-    // Accept connections
+    // Accept connections with rate limiting
     loop {
         match listener.accept().await {
             Ok((tcp_stream, addr)) => {
-                info!("New connection from {}", addr);
-
-                let tls_acceptor = tls_acceptor.clone();
-                let unix_path = config.unix_socket.clone();
-                
-                // Handle each connection in separate task
-                tokio::spawn(async move {
-                    // Perform TLS handshake with client certificate validation
-                    match tls_acceptor.accept(tcp_stream).await {
-                        Ok(tls_stream) => {
-                            if let Err(e) = handle_client(tls_stream, unix_path, addr).await {
-                                error!("Client handling error for {}: {:#}", addr, e);
+                let client_ip = addr.ip();
+                // Check IP-based rate limit first (pre-authentication)
+                match ip_rate_limiter.check_key(&client_ip) {
+                    Ok(_) => {
+                        info!("New connection from {} (IP check passed)", addr);
+                        
+                        let tls_acceptor = tls_acceptor.clone();
+                        let unix_path = config.unix_socket.clone();
+                        let pubkey_rate_limiter = pubkey_rate_limiter.clone();
+                        
+                        // Handle each connection in separate task
+                        tokio::spawn(async move {
+                            // Perform TLS handshake with client certificate validation
+                            match tls_acceptor.accept(tcp_stream).await {
+                                Ok(tls_stream) => {
+                                    // Since we only accept one specific public key, all authenticated 
+                                    // connections are from the same client. Use that pubkey for rate limiting.
+                                    
+                                    // Check pubkey-based rate limit (this prevents the same client from 
+                                    // using multiple IPs to bypass IP-based rate limiting)
+                                    match pubkey_rate_limiter.check_key(&pubkey) {
+                                        Ok(_) => {
+                                            info!("Connection from {} authenticated and global rate limit passed", addr);
+                                            if let Err(e) = handle_client(tls_stream, unix_path, addr).await {
+                                                error!("Client handling error for {}: {:#}", addr, e);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            warn!("Global rate limit exceeded for authorized client from {} - blocking covert channel via multiple IPs", addr);
+                                            // Connection authenticated but rate limited globally
+                                            drop(tls_stream);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("TLS handshake failed for {}: {}", addr, e);
+                                }
                             }
-                        }
-                        Err(e) => {
-                            warn!("TLS handshake failed for {}: {}", addr, e);
-                        }
+                        });
                     }
-                });
+                    Err(_) => {
+                        warn!("IP rate limit exceeded for {} - possible covert channel attempt", addr);
+                        drop(tcp_stream); // Silently drop connection
+                    }
+                }
             }
             Err(e) => error!("Failed to accept connection: {}", e),
         }

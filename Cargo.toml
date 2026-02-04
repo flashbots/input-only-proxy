@@ -23,3 +23,6 @@ tokio-rustls = "0.26"
 rcgen = { version = "0.14.7", features = ["crypto"] }
 rustls-pemfile = "2.2.0"
 x509-parser = "0.18.0"
+
+# Rate limiting for covert channel prevention
+governor = "0.10.4"
