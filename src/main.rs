@@ -48,13 +48,9 @@ struct Config {
     #[clap(long, env = "RUST_LOG", default_value = "info")]
     log_level: String,
 
-    /// Path to store/load server certificate
-    #[clap(long, default_value = "/persistent/server.crt")]
-    server_cert_path: PathBuf,
-
-    /// Path to store/load server private key
-    #[clap(long, default_value = "/persistent/server.key")]
-    server_key_path: PathBuf,
+    /// Base path for server certificate and key files (will create .crt and .key files)
+    #[clap(long, default_value = "/persistent/input-proxy")]
+    cert_base_path: PathBuf,
 }
 
 /// Load Ed25519 public key from SSH format (handles both full and base64-only formats)
@@ -282,12 +278,15 @@ fn load_cert_and_key(
 
 /// Load existing certificate or generate new one
 async fn load_or_generate_server_cert(
-    cert_path: &Path,
-    key_path: &Path,
+    cert_base_path: &Path,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+    // Build the actual paths
+    let cert_path = cert_base_path.with_extension("crt");
+    let key_path = cert_base_path.with_extension("key");
+
     if cert_path.exists() && key_path.exists() {
         // Load existing certificate and key
-        load_cert_and_key(cert_path, key_path)
+        load_cert_and_key(&cert_path, &key_path)
     } else {
         // Create parent directory if needed
         if let Some(dir) = cert_path.parent() {
@@ -296,10 +295,10 @@ async fn load_or_generate_server_cert(
         }
 
         // Generate and store new certificate
-        generate_and_store_cert(cert_path, key_path)?;
-        
+        generate_and_store_cert(&cert_path, &key_path)?;
+
         // Load the newly generated files
-        load_cert_and_key(cert_path, key_path)
+        load_cert_and_key(&cert_path, &key_path)
     }
 }
 
@@ -445,8 +444,7 @@ async fn main() -> Result<()> {
 
     // Load or generate server certificate
     let (cert_chain, key_der) = load_or_generate_server_cert(
-        &config.server_cert_path,
-        &config.server_key_path
+        &config.cert_base_path
     ).await?;
 
     // Configure TLS with custom client cert verifier
