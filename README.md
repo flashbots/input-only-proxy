@@ -69,8 +69,7 @@ cargo build --release
     --listen 0.0.0.0:27018 \
     --unix-socket /persistent/input/input.sock \
     --pubkey-file /etc/searcher_key \  # SSH public key (ed25519)
-    --server-cert-path /persistent/server.crt \
-    --server-key-path /persistent/server.key
+    --cert-base-path /persistent/input-proxy
 ```
 
 ### Client
@@ -97,8 +96,7 @@ cargo run --example unix_listener
 cargo run -- \
     --unix-socket /tmp/test_input.sock \
     --pubkey-file ~/.ssh/id_ed25519.pub \
-    --server-cert-path /tmp/server.crt \
-    --server-key-path /tmp/server.key
+    --cert-base-path /tmp/test-proxy
 ```
 
 3. Generate client certificate and connect (in third terminal):
@@ -110,7 +108,7 @@ cargo run -- \
 cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem
 
 # Alternative: Connect with server certificate verification
-cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem /tmp/server.crt
+cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem /tmp/test-proxy.crt
 ```
 
 ## Configuration
@@ -120,8 +118,7 @@ cargo run --example tls_client -- 127.0.0.1:27018 client-cert.pem /tmp/server.cr
 | `--listen` | `0.0.0.0:27018` | TLS address to listen on |
 | `--unix-socket` | `/persistent/input/input.sock` | Unix socket path to forward to |
 | `--pubkey-file` | `/etc/searcher_key` | SSH Ed25519 public key file |
-| `--server-cert-path` | `/persistent/server.crt` | Server TLS certificate file (auto-generated if missing) |
-| `--server-key-path` | `/persistent/server.key` | Server TLS private key file (auto-generated if missing) |
+| `--cert-base-path` | `/persistent/input-proxy` | Base path for certificate (.crt) and key (.key) files (auto-generated if missing) |
 | `--log-level` | `info` | Logging level (via `RUST_LOG` env var) |
 
 
