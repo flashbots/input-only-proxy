@@ -320,11 +320,8 @@ async fn tls_to_channel_reader(
         total_bytes += bytes_read as u64;
 
         // Send to channel (never blocks - critical for timing isolation)
-        let chunk = buffer[..bytes_read].to_vec();
-        if sender.send(chunk).is_err() {
-            warn!("Channel receiver dropped - stopping TLS reader");
-            break;
-        }
+        // Don't alert sender when container closes connection
+        let _ = sender.send(buffer[..bytes_read].to_vec());
 
         // Progress logging for large transfers
         if total_bytes % (100 * 1024 * 1024) == 0 {
@@ -364,11 +361,7 @@ async fn forward_with_timing_isolation(
     tls_stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     unix_socket: &Path
 ) -> Result<()> {
-    // Connect to container with timeout
-    let unix_stream = connect_to_container(unix_socket).await?;
-
-    // Split streams for concurrent read/write
-    let (tls_read, _tls_write) = tokio::io::split(tls_stream);
+    let (tls_read, _) = tokio::io::split(tls_stream);
 
     // Create unbounded channel - THIS IS THE CRITICAL SECURITY COMPONENT
     // Unbounded = TLS reader never waits for container consumption speed
@@ -378,6 +371,7 @@ async fn forward_with_timing_isolation(
 
     // Spawn both tasks concurrently
     let tls_task = tokio::spawn(tls_to_channel_reader(tls_read, sender));
+    let unix_stream = connect_to_container(unix_socket).await?;
     let unix_task = tokio::spawn(channel_to_unix_writer(receiver, unix_stream));
 
     // Wait for both to complete
