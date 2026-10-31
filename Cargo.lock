@@ -561,6 +561,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ed25519-dalek",
+ "libc",
  "rcgen",
  "rustls",
  "rustls-pemfile",

@@ -19,6 +19,8 @@ use ssh_key::PublicKey;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -80,32 +82,16 @@ async fn load_ed25519_pubkey(path: &Path) -> Result<VerifyingKey> {
         .context("Invalid Ed25519 key bytes")
 }
 
-/// Security check: ensure path is actually a Unix socket (not a symlink)
-async fn verify_unix_socket(path: &Path) -> Result<()> {
-    if !path.exists() {
-        return Ok(()); // Will be created by container
-    }
-
-    // Use symlink_metadata to check the path itself, not following symlinks
-    let metadata = tokio::fs::symlink_metadata(path).await?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if !metadata.file_type().is_socket() {
-            bail!("Security violation: {} exists but is not a Unix socket", path.display());
-        }
-    }
-
-    Ok(())
-}
-
 /// Connect to Unix socket with timeout
 async fn connect_to_container(socket_path: &Path) -> Result<UnixStream> {
-    verify_unix_socket(socket_path).await?;
+    // Pin to inode
+    let socket = File::options().read(true).custom_flags(libc::O_PATH | libc::O_NOFOLLOW).open(socket_path)?;
+    if !socket.metadata()?.file_type().is_socket() {
+        bail!("Security violation: {} is not a Unix socket", socket_path.display());
+    }
 
     let timeout = std::time::Duration::from_secs(10);
-    tokio::time::timeout(timeout, UnixStream::connect(socket_path))
+    tokio::time::timeout(timeout, UnixStream::connect(format!("/proc/self/fd/{}", socket.as_raw_fd())))
         .await
         .context("Timeout connecting to container socket")?
         .with_context(|| format!("Failed to connect to: {}", socket_path.display()))
