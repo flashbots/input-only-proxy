@@ -306,11 +306,8 @@ async fn tls_to_channel_reader(
         total_bytes += bytes_read as u64;
 
         // Send to channel (never blocks - critical for timing isolation)
-        let chunk = buffer[..bytes_read].to_vec();
-        if sender.send(chunk).is_err() {
-            warn!("Channel receiver dropped - stopping TLS reader");
-            break;
-        }
+        // Don't alert sender when container closes connection
+        let _ = sender.send(buffer[..bytes_read].to_vec());
 
         // Progress logging for large transfers
         if total_bytes % (100 * 1024 * 1024) == 0 {
@@ -325,24 +322,48 @@ async fn tls_to_channel_reader(
 /// Consumption speed variations DO NOT affect TLS/TCP timing due to unbounded channel
 async fn channel_to_unix_writer(
     mut receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    mut unix_stream: UnixStream
-) -> Result<u64> {
+    unix_socket: PathBuf
+) -> u64 {
+    let mut unix_stream: Option<UnixStream> = None;
     let mut total_bytes = 0u64;
+    let mut dropped_bytes = 0u64;
 
-    // Forward all data from channel to Unix socket
-    // Container can process at any speed without affecting TLS timing
     while let Some(chunk) = receiver.recv().await {
-        unix_stream.write_all(&chunk).await
-            .context("Failed to write to container")?;
+        if unix_stream.is_none() {
+            match connect_to_container(&unix_socket).await {
+                Ok(stream) => {
+                    if dropped_bytes > 0 {
+                        info!("Reconnected to container after dropping {} bytes", dropped_bytes);
+                        dropped_bytes = 0;
+                    }
+                    unix_stream = Some(stream);
+                }
+                Err(e) => {
+                    if dropped_bytes == 0 {
+                        warn!("Container unreachable, dropping data until it returns: {:#}", e);
+                    }
+                    dropped_bytes += chunk.len() as u64;
+                    continue;
+                }
+            }
+        }
+        let Some(stream) = unix_stream.as_mut() else { continue };
+
+        if let Err(e) = stream.write_all(&chunk).await {
+            warn!("Write to container failed, reconnecting: {}", e);
+            dropped_bytes += chunk.len() as u64;
+            unix_stream = None;
+            continue;
+        }
 
         total_bytes += chunk.len() as u64;
-        
+
         if total_bytes % (100 * 1024 * 1024) == 0 {
             info!("Forwarded {}MB to container", total_bytes / (1024 * 1024));
         }
     }
 
-    Ok(total_bytes)
+    total_bytes
 }
 
 /// Main data forwarding with timing isolation
@@ -350,11 +371,7 @@ async fn forward_with_timing_isolation(
     tls_stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     unix_socket: &Path
 ) -> Result<()> {
-    // Connect to container with timeout
-    let unix_stream = connect_to_container(unix_socket).await?;
-
-    // Split streams for concurrent read/write
-    let (tls_read, _tls_write) = tokio::io::split(tls_stream);
+    let (tls_read, _) = tokio::io::split(tls_stream);
 
     // Create unbounded channel - THIS IS THE CRITICAL SECURITY COMPONENT
     // Unbounded = TLS reader never waits for container consumption speed
@@ -364,20 +381,21 @@ async fn forward_with_timing_isolation(
 
     // Spawn both tasks concurrently
     let tls_task = tokio::spawn(tls_to_channel_reader(tls_read, sender));
-    let unix_task = tokio::spawn(channel_to_unix_writer(receiver, unix_stream));
+    let unix_task = tokio::spawn(channel_to_unix_writer(receiver, unix_socket.to_path_buf()));
 
     // Wait for both to complete
     let (tls_result, unix_result) = tokio::join!(tls_task, unix_task);
 
     let bytes_received = tls_result.context("TLS reader failed")??;
-    let bytes_forwarded = unix_result.context("Unix writer failed")??;
+    let bytes_forwarded = unix_result.context("Unix writer failed")?;
     
     info!("Transfer complete: {}MB received, {}MB forwarded", 
           bytes_received / (1024 * 1024), 
           bytes_forwarded / (1024 * 1024));
     
     if bytes_received != bytes_forwarded {
-        warn!("Byte count mismatch - possible channel overflow during transfer");
+        warn!("Byte count mismatch - {} bytes were not delivered to the container",
+              bytes_received - bytes_forwarded);
     }
 
     Ok(())
